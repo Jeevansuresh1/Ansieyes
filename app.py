@@ -155,6 +155,17 @@ def get_github_client(installation_id):
         return None
 
 
+def is_authorized_user(repo, username):
+    """Check if a user has write-level access or higher on the repository."""
+    try:
+        permission = repo.get_collaborator_permission(username)
+        logger.info(f"User '{username}' has permission level: {permission}")
+        return permission in ('admin', 'maintain', 'write')
+    except GithubException as e:
+        logger.warning(f"Could not check permissions for '{username}': {e}")
+        return False
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -236,6 +247,40 @@ def webhook():
                 return jsonify({"error": "No installation ID"}), 400
 
             # Check for EXACT mention triggers (no extra text allowed)
+            is_bot_command = comment_body in ('\\ansieyes_triage', '\\ansieyes_prreview')
+
+            if is_bot_command:
+                repo_full_name = payload.get('repository', {}).get('full_name')
+                github_client = get_github_client(installation_id)
+
+                if not github_client:
+                    logger.error("Failed to create GitHub client for authorization check")
+                    return jsonify({"error": "GitHub client unavailable"}), 500
+
+                try:
+                    repo = github_client.get_repo(repo_full_name)
+                except GithubException as e:
+                    logger.error(f"Failed to access repository for authorization check: {e}")
+                    return jsonify({"error": "Repository access failed"}), 500
+
+                if not is_authorized_user(repo, comment_author):
+                    logger.warning(
+                        f"Unauthorized trigger attempt by '{comment_author}' on {repo_full_name}"
+                    )
+                    try:
+                        issue_number = payload.get('issue', {}).get('number')
+                        issue = repo.get_issue(issue_number)
+                        issue.create_comment(
+                            "## :no_entry: Unauthorized\n\n"
+                            f"@{comment_author}, only repository collaborators with **write** "
+                            "access or higher are authorized to trigger Ansieyes commands.\n\n"
+                            "If you believe this is an error, please contact a repository maintainer.\n\n"
+                            "---\n*This is an automated response from Ansieyes.*"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to post unauthorized comment: {e}")
+                    return jsonify({"status": "unauthorized"}), 403
+
             if comment_body == '\\ansieyes_triage':
                 logger.info("Detected exact \\ansieyes_triage mention")
                 try:
